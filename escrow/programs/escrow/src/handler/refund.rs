@@ -32,7 +32,7 @@ pub struct Refund<'info>{
         associated_token::mint = mint_a,
         associated_token::authority= escrow
     )]
-    pub vault:InterfaceAccount<'info,TokenAccount>,
+    pub vault:Box<InterfaceAccount<'info,TokenAccount>>,
 
 
     pub token_program : Interface<'info,TokenInterface>,
@@ -40,7 +40,7 @@ pub struct Refund<'info>{
     pub system_program : Program<'info,System>
 }
 
-pub fn refund(context: Context<Refund>)->Result<()> { 
+pub fn _refund(context: Context<Refund>)->Result<()> { 
 
 
           let signer_seeds: [&[&[u8]]; 1] = [&[
@@ -61,7 +61,7 @@ pub fn refund(context: Context<Refund>)->Result<()> {
     };
 
     let cpi= CpiContext::new_with_signer(sp, tx,&signer_seeds);
-    transfer_checked(cpi, context.accounts.vault.amount, context.accounts.mint_a.decimals);
+    transfer_checked(cpi, context.accounts.vault.amount, context.accounts.mint_a.decimals)?;
 
 
     let colsetx= CloseAccount{
@@ -70,7 +70,7 @@ pub fn refund(context: Context<Refund>)->Result<()> {
         destination:context.accounts.signer.to_account_info()
     };
 
-    let cpis = CpiContext::new(sp2, colsetx);
+    let cpis = CpiContext::new_with_signer(sp2, colsetx,&signer_seeds);
 
     close_account(cpis)?;
 

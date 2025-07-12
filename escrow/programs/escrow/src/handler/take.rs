@@ -23,39 +23,40 @@ pub struct Take<'info>{
         associated_token::mint = mint_a,
         associated_token::authority= signer
     )]
-    pub self_asso_a:InterfaceAccount<'info,TokenAccount>,
+    pub self_asso_a:Box<InterfaceAccount<'info,TokenAccount>>,
 
     #[account(mut,
         associated_token::mint = mint_b,
-        associated_token::authority= token_program
+        associated_token::authority= signer
     )]
-    pub self_ass_b:InterfaceAccount<'info,TokenAccount>,
+    pub self_ass_b:Box<InterfaceAccount<'info,TokenAccount>>,
 
     #[account(
        init_if_needed,
        payer=signer,
         associated_token::mint = mint_b,
-        associated_token::authority= signer
+        associated_token::authority= maker
     )]
-    pub market_asso_b:InterfaceAccount<'info,TokenAccount>,
+    pub market_asso_b:Box<InterfaceAccount<'info,TokenAccount>>,
 
     #[account(
         mut,
         close = signer,
         has_one = mint_a,
         has_one = mint_b,
-        has_one = signer,
-        seeds = [b"escrow",signer.key().as_ref(),escrow.ids.to_le_bytes().as_ref()],
+        //has_one = signer,
+
+        seeds = [b"escrow",escrow.signer.key().as_ref(),escrow.ids.to_le_bytes().as_ref()],
         bump = escrow.bump,
 
     )]
     pub escrow:Account<'info,Escrow>,
     #[account(
         mut,
-                associated_token::mint = mint_a,
+        associated_token::mint = mint_a,
         associated_token::authority= escrow
     )]
-    pub vault:InterfaceAccount<'info,TokenAccount>,
+    pub vault:Box<InterfaceAccount<'info,TokenAccount>>,
 
     pub associated_token_program: Program<'info, AssociatedToken>,
 
@@ -65,10 +66,11 @@ pub struct Take<'info>{
 }
 
 pub fn take(context:Context<Take>)->Result<()> {
+    msg!("trasfered initiated");
 
    let acc =  TransferChecked{
-    from:context.accounts.market_asso_b.to_account_info(),
-    to:context.accounts.maker.to_account_info(),
+    from:context.accounts.self_ass_b.to_account_info(),
+    to:context.accounts.market_asso_b.to_account_info(),
     mint:context.accounts.mint_b.to_account_info(),
     authority:context.accounts.signer.to_account_info(),
 
@@ -76,7 +78,7 @@ pub fn take(context:Context<Take>)->Result<()> {
     let cpi =CpiContext::new(context.accounts.token_program.to_account_info(), acc);
 
     transfer_checked(cpi, context.accounts.escrow.demand, context.accounts.mint_b.decimals)?;
-    
+    msg!("trasfered completed");
 
     refund(context)?;
     Ok(())
@@ -84,35 +86,36 @@ pub fn take(context:Context<Take>)->Result<()> {
 
 pub fn refund(context: Context<Take>)->Result<()> { 
 
-
-          let signer_seeds: [&[&[u8]]; 1] = [&[
+let seed = context.accounts.escrow.ids.to_le_bytes();
+          let signer_seeds = &[
             b"escrow",
-            context.accounts.signer.key.as_ref(),
-            &context.accounts.escrow.ids.to_le_bytes()[..],
+            context.accounts.escrow.signer.as_ref(),
+            seed.as_ref(),
             &[context.accounts.escrow.bump]
-        ]];
+        ];
+         let signer_s = [&signer_seeds[..]];
 
         let sp = context.accounts.token_program.to_account_info();
         let sp2= sp.clone();
         
     let tx = TransferChecked{
         from:context.accounts.vault.to_account_info(),
-        to:context.accounts.market_asso_b.to_account_info(),
+        to:context.accounts.self_asso_a.to_account_info(),
         mint:context.accounts.mint_a.to_account_info(),
         authority:context.accounts.escrow.to_account_info()
     };
 
-    let cpi= CpiContext::new_with_signer(sp, tx,&signer_seeds);
+    let cpi= CpiContext::new_with_signer(sp, tx,&signer_s);
     transfer_checked(cpi, context.accounts.vault.amount, context.accounts.mint_a.decimals)?;
-
+msg!("release done");
 
     let colsetx= CloseAccount{
         account:context.accounts.vault.to_account_info(),
         authority:context.accounts.escrow.to_account_info(),
-        destination:context.accounts.signer.to_account_info()
+        destination:context.accounts.maker.to_account_info()
     };
 
-    let cpis = CpiContext::new(sp2, colsetx);
+    let cpis = CpiContext::new_with_signer(sp2, colsetx,&signer_s);
 
     close_account(cpis)?;
 

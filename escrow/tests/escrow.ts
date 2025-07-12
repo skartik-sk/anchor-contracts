@@ -1,461 +1,363 @@
-import { before, describe, test, it } from "node:test";
-import assert from "node:assert";
-import * as programClient from "../dist/js-client";
-import { getOfferDecoder, OFFER_DISCRIMINATOR } from "../dist/js-client";
-import { connect, Connection, TOKEN_EXTENSIONS_PROGRAM, ErrorWithTransaction } from "solana-kite";
-import { type KeyPairSigner, type Address } from "@solana/kit";
-import { createTestOffer, getRandomBigInt, ONE_SOL } from "./escrow.test-helpers";
+import * as anchor from "@coral-xyz/anchor";
+import { Program } from "@coral-xyz/anchor";
+import { Escrow } from "../target/types/escrow";
+import {
+  TOKEN_PROGRAM_ID,
+  createMint,
+  createAccount,
+  mintTo,
+  getAccount,
+  getAssociatedTokenAddress,
+} from "@solana/spl-token";
+import { assert } from "chai";
+import { SYSTEM_PROGRAM_ID } from "@coral-xyz/anchor/dist/cjs/native/system";
 
-const INSUFFICIENT_FUNDS_ERROR = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb.TransferChecked: insufficient funds";
-const REFUND_OFFER_ERROR =
-  "8jR5GeNzeweq35Uo84kGP3v1NcBaZWH5u62k7PxN4T2y.RefundOffer: A has one constraint was violated";
-const ACCOUNT_IN_USE_ERROR = "11111111111111111111111111111111.Allocate: account already in use";
-const INVALID_TOKEN_MINT_ERROR = "custom program error: #6002";
-const INVALID_AMOUNT_ERROR = "custom program error: #6003";
+describe("Escrow Program Tests", () => {
+  // Configure the client to use the local cluster
+  anchor.setProvider(anchor.AnchorProvider.env());
 
-describe("Escrow", () => {
-  let connection: Connection;
-  let user: KeyPairSigner;
-  let alice: KeyPairSigner;
-  let bob: KeyPairSigner;
-  let tokenMintA: Address;
-  let tokenMintB: Address;
-  let aliceTokenAccountA: Address;
-  let bobTokenAccountA: Address;
-  let aliceTokenAccountB: Address;
+  const program = anchor.workspace.Escrow as Program<Escrow>;
+  const provider = anchor.getProvider();
+  const connection = provider.connection;
 
-  const tokenDecimals = 9;
+  // Test accounts
+  let maker: anchor.web3.Keypair;
+  let taker: anchor.web3.Keypair;
+  let mintA: anchor.web3.PublicKey;
+  let mintB: anchor.web3.PublicKey;
+  let makerTokenAccountA: anchor.web3.PublicKey;
+  let makerTokenAccountB: anchor.web3.PublicKey;
+  let takerTokenAccountA: anchor.web3.PublicKey;
+  let takerTokenAccountB: anchor.web3.PublicKey;
+  let escrowAccount: anchor.web3.PublicKey;
+  let vaultAccount: anchor.web3.PublicKey;
 
-  // Both tokens have 9 decimals, so we can use this to convert between major and minor units
-  const TOKEN = 10n ** BigInt(tokenDecimals);
-
-  // Alice is going to make a few offers in these tests, so we give her 10 tokens
-  const aliceInitialTokenAAmount = 10n * TOKEN;
-  // We have a test later where Bob tries to reuse Alice's offer ID, so we give him a tiny amount (1 minor unit) of token A
-  const bobInitialTokenAAmount = 1n;
-  // Bob has 1 token of token B he will offer in exchange
-  const bobInitialTokenBAmount = 1n * TOKEN;
-
-  // Alice will offer 1 token of token A in exchange for 1 token of token B
-  const tokenAOfferedAmount = 1n * TOKEN;
-  const tokenBWantedAmount = 1n * TOKEN;
+  // Test constants
+  const escrowId = new anchor.BN(1);
+  const depositAmount = new anchor.BN(1000);
+  const demandAmount = new anchor.BN(500);
 
   before(async () => {
-    connection = await connect();
+    // Create test users
+    maker = anchor.web3.Keypair.generate();
+    taker = anchor.web3.Keypair.generate();
 
-    // 'user' will be the account we use to create the token mints
-    [user, alice, bob] = await connection.createWallets(3, { airdropAmount: ONE_SOL });
+    // Airdrop SOL to test accounts
+    await connection.requestAirdrop(
+      maker.publicKey,
+      2 * anchor.web3.LAMPORTS_PER_SOL
+    );
+    await connection.requestAirdrop(
+      taker.publicKey,
+      2 * anchor.web3.LAMPORTS_PER_SOL
+    );
 
-    // Create two token mints - the factories that create token A, and token B
-    tokenMintA = await connection.createTokenMint({
-      mintAuthority: user,
-      decimals: tokenDecimals,
-      name: "Token A",
-      symbol: "TOKEN_A",
-      uri: "https://example.com/token-a",
-      additionalMetadata: {
-        keyOne: "valueOne",
-        keyTwo: "valueTwo",
-      },
-    });
+    // Wait for airdrops to confirm
+    await new Promise((resolve) => setTimeout(resolve, 500));
 
-    tokenMintB = await connection.createTokenMint({
-      mintAuthority: user,
-      decimals: tokenDecimals,
-      name: "Token B",
-      symbol: "TOKEN_B",
-      uri: "https://example.com/token-b",
-      additionalMetadata: {
-        keyOne: "valueOne",
-        keyTwo: "valueTwo",
-      },
-    });
+    // Create test tokens
+    mintA = await createMint(
+      connection,
+      maker,
+      maker.publicKey,
+      null,
+      9 // 9 decimals
+    );
+    mintB = await createMint(
+      connection,
+      taker,
+      taker.publicKey,
+      null,
+      9 // 9 decimals
+    );
 
-    // Mint tokens to alice and bob
-    await connection.mintTokens(tokenMintA, user, aliceInitialTokenAAmount, alice.address);
-    await connection.mintTokens(tokenMintA, user, bobInitialTokenAAmount, bob.address);
-    await connection.mintTokens(tokenMintB, user, bobInitialTokenBAmount, bob.address);
+    // Create token accounts
+    makerTokenAccountA = await createAccount(
+      connection,
+      maker,
+      mintA,
+      maker.publicKey
+    );
+    makerTokenAccountB = await createAccount(
+      connection,
+      maker,
+      mintB,
+      maker.publicKey
+    );
 
-    // Get the token accounts for alice and bob
-    aliceTokenAccountA = await connection.getTokenAccountAddress(alice.address, tokenMintA, true);
-    bobTokenAccountA = await connection.getTokenAccountAddress(bob.address, tokenMintA, true);
-    aliceTokenAccountB = await connection.getTokenAccountAddress(alice.address, tokenMintB, true);
+    takerTokenAccountA = await createAccount(
+      connection,
+      taker,
+      mintA,
+      taker.publicKey
+    );
+
+    takerTokenAccountB = await createAccount(
+      connection,
+      taker,
+      mintB,
+      taker.publicKey
+    );
+
+    // Mint tokens to accounts
+    await mintTo(
+      connection,
+      maker,
+      mintA,
+      makerTokenAccountA,
+      maker.publicKey,
+      10000 * Math.pow(10, 9) // 10,000 tokens
+    );
+    await mintTo(
+      connection,
+      taker,
+      mintB,
+      takerTokenAccountB,
+      taker.publicKey,
+      10000 * Math.pow(10, 9) // 10,000 tokens
+    );
+
+    console.log("Setup complete:");
+    console.log("Maker:", maker.publicKey.toString());
+    console.log("Taker:", taker.publicKey.toString());
+    console.log("Mint A:", mintA.toString());
+    console.log("Mint B:", mintB.toString());
+    console.log("ata a x", makerTokenAccountA.toString());
+    console.log("ata a y", makerTokenAccountB.toString());
+    console.log("ata b x", takerTokenAccountA.toString());
+    console.log("ata b y", takerTokenAccountB.toString());
   });
 
-  describe("makeOffer", () => {
-    test("successfully creates an offer with valid inputs", async () => {
-      const { offer, vault } = await createTestOffer({
-        connection,
-        maker: alice,
-        tokenMintA,
-        tokenMintB,
-        makerTokenAccountA: aliceTokenAccountA,
-        tokenAOfferedAmount,
-        tokenBWantedAmount,
-      });
+  it("1. Create Escrow - Maker deposits Token A and requests Token B", async () => {
+    console.log("\n=== TEST 1: Creating Escrow ===");
 
-      // Verify the offer was created successfully by checking the vault balance
-      const vaultBalanceResponse = await connection.getTokenAccountBalance({
-        tokenAccount: vault,
-        mint: tokenMintA,
-        useTokenExtensions: true,
-      });
-      assert.equal(vaultBalanceResponse.amount, tokenAOfferedAmount, "Vault balance should match offered amount");
-    });
+    const tx = await program.methods
+      .makeEscrow(
+        escrowId, // unique ID for this escrow
+        depositAmount, // amount of Token A to deposit
+        demandAmount // amount of Token B demanded
+      )
+      .accounts({
+        signer: maker.publicKey,
+        mintA: mintA,
+        mintB: mintB,
+        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+      })
+      .signers([maker])
+      .rpc();
 
-    test("fails when trying to reuse an existing offer ID", async () => {
-      // First, create an offer with Alice using a specific offer ID
-      const offerId = getRandomBigInt();
-      await createTestOffer({
-        connection,
-        maker: alice,
-        tokenMintA,
-        tokenMintB,
-        makerTokenAccountA: aliceTokenAccountA,
-        tokenAOfferedAmount,
-        tokenBWantedAmount,
-        offerId,
-      });
-
-      // Now try to create another offer with Bob using the same offer ID
-
-      // Create bobTokenAccountA if it doesn't exist
-      bobTokenAccountA = await connection.getTokenAccountAddress(bob.address, tokenMintA, true);
-
-      let testOffer: { offer: Address; vault: Address; offerId: bigint; signature: string };
-      try {
-        testOffer = await createTestOffer({
-          connection,
-          maker: bob,
-          tokenMintA,
-          tokenMintB,
-          makerTokenAccountA: bobTokenAccountA,
-          tokenAOfferedAmount: bobInitialTokenAAmount,
-          tokenBWantedAmount,
-          offerId, // Reusing the same offer ID
-        });
-      } catch (thrownObject) {
-        const error = thrownObject as ErrorWithTransaction;
-        assert.equal(error.message, ACCOUNT_IN_USE_ERROR);
-      }
-    });
-
-    test("fails when maker has insufficient token balance", async () => {
-      const tooManyTokens = 1_000n * TOKEN;
-
-      try {
-        await createTestOffer({
-          connection,
-          maker: alice,
-          tokenMintA,
-          tokenMintB,
-          makerTokenAccountA: aliceTokenAccountA,
-          tokenAOfferedAmount: tooManyTokens,
-          tokenBWantedAmount,
-        });
-        assert.fail("Expected the offer creation to fail but it succeeded");
-      } catch (thrownObject) {
-        const error = thrownObject as ErrorWithTransaction;
-        assert(
-          error.message === INSUFFICIENT_FUNDS_ERROR,
-          `Expected "${INSUFFICIENT_FUNDS_ERROR}" but got: ${error.message}`,
-        );
-      }
-    });
-
-    test("fails when token mints are the same", async () => {
-      try {
-        await createTestOffer({
-          connection,
-          maker: alice,
-          tokenMintA,
-          tokenMintB: tokenMintA, // Using same mint
-          makerTokenAccountA: aliceTokenAccountA,
-          tokenAOfferedAmount,
-          tokenBWantedAmount,
-        });
-        assert.fail("Expected the offer creation to fail but it succeeded");
-      } catch (thrownObject) {
-        const error = thrownObject as ErrorWithTransaction;
-        assert(
-          error.message.includes(INVALID_TOKEN_MINT_ERROR),
-          `Expected InvalidTokenMint error but got: ${error.message}`,
-        );
-      }
-    });
-
-    test("fails when token_b_wanted_amount is zero", async () => {
-      try {
-        await createTestOffer({
-          connection,
-          maker: alice,
-          tokenMintA,
-          tokenMintB,
-          makerTokenAccountA: aliceTokenAccountA,
-          tokenAOfferedAmount,
-          tokenBWantedAmount: 0n,
-        });
-        assert.fail("Expected the offer creation to fail but it succeeded");
-      } catch (thrownObject) {
-        const error = thrownObject as ErrorWithTransaction;
-        assert(error.message.includes(INVALID_AMOUNT_ERROR), `Expected InvalidAmount error but got: ${error.message}`);
-      }
-    });
-
-    test("fails when token_a_offered_amount is zero", async () => {
-      try {
-        await createTestOffer({
-          connection,
-          maker: alice,
-          tokenMintA,
-          tokenMintB,
-          makerTokenAccountA: aliceTokenAccountA,
-          tokenAOfferedAmount: 0n,
-          tokenBWantedAmount,
-        });
-        assert.fail("Expected the offer creation to fail but it succeeded");
-      } catch (thrownObject) {
-        const error = thrownObject as ErrorWithTransaction;
-        assert(error.message.includes(INVALID_AMOUNT_ERROR), `Expected InvalidAmount error but got: ${error.message}`);
-      }
-    });
-  });
-
-  describe("can get all the offers", () => {
-    test("successfully gets all the offers", async () => {
-      const getOffers = connection.getAccountsFactory(
-        programClient.ESCROW_PROGRAM_ADDRESS,
-        OFFER_DISCRIMINATOR,
-        getOfferDecoder(),
+    console.log("Transaction signature:", tx);
+     [escrowAccount] =
+      await anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("escrow"),
+          maker.publicKey.toBuffer(),
+          escrowId.toArrayLike(Buffer, "le", 8),
+        ],
+        program.programId
       );
 
-      const offers = await getOffers();
+    console.log("escrowacc: ", escrowAccount);
+    // Verify escrow account was created
+    const escrowDataall = await program.account.escrow.all();
+    console.log("data", escrowDataall);
+    const escrowData = await program.account.escrow.fetch(escrowAccount);
+    assert.equal(
+      new anchor.BN(escrowData.ids).toNumber(),
+      escrowId.toNumber(),
+      "id not same"
+    );
+    assert.equal(
+      new anchor.BN(escrowData.demand).toNumber(),
+      demandAmount.toNumber(),
+      "demand not same"
+    );
+    assert.equal(escrowData.mintA.toString(), mintA.toString());
+    assert.equal(escrowData.mintB.toString(), mintB.toString());
+    assert.equal(escrowData.signer.toString(), maker.publicKey.toString());
+    // Verify tokens were transferred to vault
+    vaultAccount = await getAssociatedTokenAddress(
+      mintA,
+      escrowAccount,
+      true
 
-      assert.ok(offers.length === 2, "Expected to get two offers");
+      // owner (the escrow PDA)
+    );
+    const vaultBalance = await getAccount(connection, vaultAccount);
+    assert.equal(vaultBalance.amount.toString(), depositAmount.toString());
+    console.log("varified till now");
 
-      // The first offer is created in the 'successfully creates an offer with valid inputs' test
-      const offer1 = offers[0];
-      assert.ok(offer1.exists, "Offer 1 account should exist");
-      if (offer1.exists) {
-        // This offer was created by Alice in the first makeOffer test
-        assert.equal(offer1.address, offer1.address, "Offer 1 address should match");
-        assert.equal(offer1.data.maker, alice.address, "Offer 1 maker address should match Alice");
-        assert.equal(offer1.data.tokenMintA, tokenMintA, "Offer 1 tokenMintA should match");
-        assert.equal(offer1.data.tokenMintB, tokenMintB, "Offer 1 tokenMintB should match");
-        assert.equal(
-          offer1.data.tokenBWantedAmount,
-          tokenBWantedAmount.toString(),
-          "Offer 1 tokenBWantedAmount should match",
-        );
-        assert.ok(typeof offer1.data.bump === "number", "Offer 1 bump should be a number");
-        assert.ok(offer1.data.discriminator, "Offer 1 discriminator should exist");
-      }
-
-      // The second offer is created in the 'fails when trying to reuse an existing offer ID' test (by Alice, before Bob tries to reuse the ID)
-      const offer2 = offers[1];
-      assert.ok(offer2.exists, "Offer 2 account should exist");
-      if (offer2.exists) {
-        // This offer was also created by Alice, with a specific offer ID
-        assert.equal(offer2.address, offer2.address, "Offer 2 address should match");
-        assert.equal(offer2.data.maker, alice.address, "Offer 2 maker address should match Alice");
-        assert.equal(offer2.data.tokenMintA, tokenMintA, "Offer 2 tokenMintA should match");
-        assert.equal(offer2.data.tokenMintB, tokenMintB, "Offer 2 tokenMintB should match");
-        assert.equal(
-          offer2.data.tokenBWantedAmount,
-          tokenBWantedAmount.toString(),
-          "Offer 2 tokenBWantedAmount should match",
-        );
-        assert.ok(typeof offer2.data.bump === "number", "Offer 2 bump should be a number");
-        assert.ok(offer2.data.discriminator, "Offer 2 discriminator should exist");
-      }
-    });
+    console.log("✅ Escrow created successfully!");
+    console.log("Escrow ID:", escrowData.ids.toString());
+    console.log("Deposited:", depositAmount.toString(), "Token A");
+    console.log("Demanding:", demandAmount.toString(), "Token B");
   });
 
-  describe("takeOffer", () => {
-    let testOffer: Address;
-    let testVault: Address;
+  it("2. Take Escrow - Taker provides Token B and receives Token A", async () => {
+    console.log("\n=== TEST 2: Taking Escrow ===");
 
-    before(async () => {
-      const result = await createTestOffer({
-        connection,
-        maker: alice,
-        tokenMintA,
-        tokenMintB,
-        makerTokenAccountA: aliceTokenAccountA,
-        tokenAOfferedAmount,
-        tokenBWantedAmount,
-      });
-      testOffer = result.offer;
-      testVault = result.vault;
-    });
+    const tx = await program.methods
+    .take()
+    .accounts({
+      signer: taker.publicKey,           // Taker is the signer
+      maker: maker.publicKey,            // Original maker                    // Token A mint              // Token B mint   // Maker's Token B account (receives Token B)
+      escrow: escrowAccount,             // Escrow PDA             // Vault containing Token A
+      tokenProgram: TOKEN_PROGRAM_ID,
 
-    test("successfully takes an offer", async () => {
-      const takeOfferInstruction = await programClient.getTakeOfferInstructionAsync({
-        taker: bob,
-        maker: alice.address,
-        tokenMintA,
-        tokenMintB,
-        takerTokenAccountA: bobTokenAccountA,
-        makerTokenAccountB: aliceTokenAccountB,
-        offer: testOffer,
-        vault: testVault,
-        tokenProgram: TOKEN_EXTENSIONS_PROGRAM,
-      });
+    })
+    .signers([taker])
+    .rpc();
 
-      await connection.sendTransactionFromInstructions({
-        feePayer: alice,
-        instructions: [takeOfferInstruction],
-      });
+    console.log("Transaction signature:", tx);
 
-      // Verify token transfers
-      const bobTokenABalance = await connection.getTokenAccountBalance({
-        tokenAccount: bobTokenAccountA,
-        mint: tokenMintA,
-        useTokenExtensions: true,
-      });
-      assert.equal(
-        bobTokenABalance.amount,
-        bobInitialTokenAAmount + tokenAOfferedAmount,
-        "Bob's token A balance should be initial + offered amount",
-      );
+    // Verify token exchanges
+    const takerTokenABalance = await getAccount(connection, takerTokenAccountA);
+    const makerTokenBBalance = await getAccount(connection, makerTokenAccountB);
 
-      const aliceTokenBBalance = await connection.getTokenAccountBalance({
-        tokenAccount: aliceTokenAccountB,
-        mint: tokenMintB,
-        useTokenExtensions: true,
-      });
-      assert.equal(aliceTokenBBalance.amount, tokenBWantedAmount, "Alice's token B balance should match wanted amount");
-    });
+    assert.equal(
+      takerTokenABalance.amount.toString(),
+      depositAmount.toString()
+    );
+    assert.equal(makerTokenBBalance.amount.toString(), demandAmount.toString());
 
-    test("fails when taker has insufficient token balance", async () => {
-      // Create an offer from Alice for a large amount of token B
-      const largeTokenBAmount = 1000n * TOKEN; // Much larger than Bob's balance
-      const { offer, vault } = await createTestOffer({
-        connection,
-        maker: alice,
-        tokenMintA,
-        tokenMintB,
-        makerTokenAccountA: aliceTokenAccountA,
-        tokenAOfferedAmount,
-        tokenBWantedAmount: largeTokenBAmount,
-      });
+    console.log("✅ Escrow taken successfully!");
+    console.log("Taker received:", depositAmount.toString(), "Token A");
+    console.log("Maker received:", demandAmount.toString(), "Token B");
 
-      const takeOfferInstruction = await programClient.getTakeOfferInstructionAsync({
-        taker: bob,
-        maker: alice.address,
-        tokenMintA,
-        tokenMintB,
-        takerTokenAccountA: bobTokenAccountA,
-        makerTokenAccountB: aliceTokenAccountB,
-        offer,
-        vault,
-        tokenProgram: TOKEN_EXTENSIONS_PROGRAM,
-      });
-
-      try {
-        await connection.sendTransactionFromInstructions({
-          feePayer: bob,
-          instructions: [takeOfferInstruction],
-        });
-        assert.fail("Expected the take offer to fail but it succeeded");
-      } catch (thrownObject) {
-        const error = thrownObject as ErrorWithTransaction;
-        assert(
-          error.message === INSUFFICIENT_FUNDS_ERROR,
-          `Expected "${INSUFFICIENT_FUNDS_ERROR}" but got: ${error.message}`,
-        );
-      }
-    });
+    // Verify escrow account was closed
+    try {
+      await program.account.escrow.fetch(escrowAccount);
+      assert.fail("Escrow account should have been closed");
+    } catch (error) {
+      console.log("✅ Escrow account closed successfully");
+    }
   });
 
-  describe("refundOffer", () => {
-    let testOffer: Address;
-    let testVault: Address;
+  it("3. Create and Refund Escrow - Maker cancels and gets tokens back", async () => {
+    console.log("\n=== TEST 3: Creating and Refunding Escrow ===");
 
-    before(async () => {
-      const result = await createTestOffer({
-        connection,
-        maker: alice,
-        tokenMintA,
-        tokenMintB,
-        makerTokenAccountA: aliceTokenAccountA,
-        tokenAOfferedAmount,
-        tokenBWantedAmount,
-      });
-      testOffer = result.offer;
-      testVault = result.vault;
-    });
+    const newEscrowId = new anchor.BN(2);
 
-    test("successfully refunds an offer to the maker", async () => {
-      const aliceBalanceBefore = await connection.getTokenAccountBalance({
-        tokenAccount: aliceTokenAccountA,
-        mint: tokenMintA,
-        useTokenExtensions: true,
-      });
+    // Derive new PDA addresses
+    const [newEscrowAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("escrow"),
+        maker.publicKey.toBuffer(),
+        newEscrowId.toArrayLike(Buffer, "le", 8),
+      ],
+      program.programId
+    );
 
-      const refundOfferInstruction = await programClient.getRefundOfferInstructionAsync({
-        maker: alice,
-        tokenMintA,
-        makerTokenAccountA: aliceTokenAccountA,
-        offer: testOffer,
-        vault: testVault,
-        tokenProgram: TOKEN_EXTENSIONS_PROGRAM,
-      });
 
-      await connection.sendTransactionFromInstructions({
-        feePayer: alice,
-        instructions: [refundOfferInstruction],
-      });
+    // Create new escrow
+    await program.methods
+      .makeEscrow(newEscrowId, depositAmount, demandAmount)
+      .accounts({
+        signer: maker.publicKey,
+        mintA: mintA,
+        mintB: mintB,
+        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+      })
+      .signers([maker])
+      .rpc();
 
-      // Verify refund
-      const aliceBalanceAfter = await connection.getTokenAccountBalance({
-        tokenAccount: aliceTokenAccountA,
-        mint: tokenMintA,
-        useTokenExtensions: true,
-      });
-      assert.ok(
-        aliceBalanceAfter.amount > aliceBalanceBefore.amount,
-        "Balance after refund should be greater than before",
-      );
+    console.log("New escrow created");
 
-      // Verify vault is closed
-      const isClosed = await connection.checkTokenAccountIsClosed({
-        tokenAccount: testVault,
-        useTokenExtensions: true,
-      });
-      assert.ok(isClosed, "Vault should be closed");
-    });
+    // Get maker's token balance before refund
+    const balanceBefore = await getAccount(connection, makerTokenAccountA);
+    console.log(
+      "Maker's Token A balance before refund:",
+      balanceBefore.amount.toString()
+    );
 
-    test("fails when non-maker tries to refund the offer", async () => {
-      const { offer, vault } = await createTestOffer({
-        connection,
-        maker: alice,
-        tokenMintA,
-        tokenMintB,
-        makerTokenAccountA: aliceTokenAccountA,
-        tokenAOfferedAmount,
-        tokenBWantedAmount,
-      });
+    // Refund the escrow
+    const refundTx = await program.methods
+      .refundIt()
+      .accounts({
+        signer: maker.publicKey,
+        mintA: mintA,
+        escrow:newEscrowAccount,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([maker])
+      .rpc();
 
-      const refundOfferInstruction = await programClient.getRefundOfferInstructionAsync({
-        maker: bob,
-        tokenMintA,
-        makerTokenAccountA: bobTokenAccountA,
-        offer,
-        vault,
-        tokenProgram: TOKEN_EXTENSIONS_PROGRAM,
-      });
+    console.log("Refund transaction signature:", refundTx);
 
-      try {
-        await connection.sendTransactionFromInstructions({
-          feePayer: bob,
-          instructions: [refundOfferInstruction],
-        });
-        assert.fail("Expected the refund to fail but it succeeded");
-      } catch (thrownObject) {
-        const error = thrownObject as ErrorWithTransaction;
-        assert.equal(error.message, REFUND_OFFER_ERROR, "Expected refund offer error");
-      }
-    });
+    // Verify tokens were returned
+    const balanceAfter = await getAccount(connection, makerTokenAccountA);
+    console.log(
+      "Maker's Token A balance after refund:",
+      balanceAfter.amount.toString()
+    );
+
+    assert.equal(balanceAfter.amount - balanceBefore.amount, depositAmount);
+
+    console.log("✅ Refund successful!");
+    console.log("Maker received back:", depositAmount.toString(), "Token A");
+
+    // Verify escrow account was closed
+    try {
+      await program.account.escrow.fetch(newEscrowAccount);
+      assert.fail("Escrow account should have been closed");
+    } catch (error) {
+      console.log("✅ Escrow account closed successfully");
+    }
+  });
+
+  it("4. Error Case - Non-owner cannot refund", async () => {
+    console.log("\n=== TEST 4: Error Case - Unauthorized Refund ===");
+
+    const newEscrowId = new anchor.BN(3);
+
+    // Derive new PDA addresses
+    const [newEscrowAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("escrow"),
+        maker.publicKey.toBuffer(),
+        newEscrowId.toArrayLike(Buffer, "le", 8),
+      ],
+      program.programId
+    );
+
+    const [newVaultAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), newEscrowAccount.toBuffer(), mintA.toBuffer()],
+      program.programId
+    );
+
+    // Create new escrow
+    await program.methods
+      .makeEscrow(newEscrowId, depositAmount, demandAmount)
+      .accounts({
+        signer: maker.publicKey,
+        mintA: mintA,
+        mintB: mintB,
+        tokenProgram: TOKEN_PROGRAM_ID,
+       
+      })
+      .signers([maker])
+      .rpc();
+
+    console.log("New escrow created for error test");
+
+    // Try to refund with wrong signer (should fail)
+    try {
+      await program.methods
+        .refundIt()
+        .accounts({
+          signer: taker.publicKey, // Wrong signer!
+          mintA: mintA,
+          escrow: newEscrowAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+         
+        })
+        .signers([taker])
+        .rpc();
+
+      assert.fail("Should have failed with wrong signer");
+    } catch (error) {
+      console.log("✅ Correctly rejected unauthorized refund");
+      console.log("Error:", error.message);
+    }
   });
 });
