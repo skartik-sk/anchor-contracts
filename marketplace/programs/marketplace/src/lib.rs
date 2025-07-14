@@ -1,43 +1,42 @@
 use anchor_lang::prelude::*;
 
-declare_id!("8DJpSGGS8RbaAdC9UtP1ds5Meja1G457oLE8o9zm2oCD");
+declare_id!("41NF3e7ThxSRwgpYWvpRfDrmvza9gXcPTyqEqQ3ZKQkJ");
 
-mod state;
-mod error;
+pub mod contants;
+pub mod error;
+pub mod instructions;
+pub mod state;
 
-mod instructions;
 use instructions::*;
-use error::*;
 
 #[program]
-pub mod anchor_marketplace {
+pub mod market_place {
 
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, name: String, fee: u16) -> Result<()> {
-        ctx.accounts.init(name, fee, &ctx.bumps)?;
-
+    pub fn initialize(ctx: Context<InitMarketplace>, name: String, fee: u16) -> Result<()> {
+        let bumps = ctx.bumps;
+        ctx.accounts.initialize_marketplace(name, fee, bumps)?;
         Ok(())
     }
 
-    pub fn listing(ctx: Context<List>, price: u64) -> Result<()> {
-        ctx.accounts.create_listing(price, &ctx.bumps)?;
-        ctx.accounts.deposit_nft()?;
-
+    pub fn deposite_nft(ctx: Context<List>, price: u16) -> Result<()> {
+        let bumps = ctx.bumps;
+        ctx.accounts.initialize_list(price, bumps)?;
+        ctx.accounts.deposite_nft()?;
         Ok(())
     }
 
-    pub fn delist(ctx: Context<Delist>) -> Result<()> {
-        ctx.accounts.withdraw_nft()?;
-
+    pub fn withdraw_nft(ctx: Context<Delist>) -> Result<()> {
+        ctx.accounts.delist_nft()?;
+        ctx.accounts.close_vault()?;
         Ok(())
     }
 
-    // pub fn purchase(ctx: Context<Purchase>) -> Result<()> {
-    //     ctx.accounts.send_sol()?;
-    //     ctx.accounts.send_nft()?;
-    //     ctx.accounts.close_mint_vault()?;
-
-    //     Ok(())
-    // }
+    pub fn purchase_nft(ctx: Context<PurchaseNFT>) -> Result<()> {
+        ctx.accounts.deposite_amount()?;
+        ctx.accounts.transfer_nft()?;
+        ctx.accounts.close_accounts()?;
+        Ok(())
+    }
 }

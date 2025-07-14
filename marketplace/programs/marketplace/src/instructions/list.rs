@@ -1,101 +1,124 @@
+use crate::{
+    contants::*,
+    state::{listing::ListingAccount, marketplace::Marketplace},
+};
 use anchor_lang::prelude::*;
-use anchor_spl::{associated_token::AssociatedToken, metadata::{MasterEditionAccount, Metadata, MetadataAccount}, token_interface::{transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked}};
+use anchor_spl::{
+    associated_token::AssociatedToken,
+    metadata::{MasterEditionAccount, Metadata, MetadataAccount},
+    token_interface::{transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked},
+};
 
-use crate::{errors::MarketplaceError, state::{Listing, Marketplace}};
+// ++++++++++++++++ Accounts Requierd ++++++++++++++++
+// - createer account <>
+// - marketplace account <>
+// - list account <>
+// - creater_nft_mint <>
+// - creater_nft_token_account <>
+// - nft_vault <>
 
 #[derive(Accounts)]
 pub struct List<'info> {
     #[account(mut)]
-    pub maker: Signer<'info>,
+    pub creater: Signer<'info>,
+
+    pub creater_mint: InterfaceAccount<'info, Mint>, // Madlad NFT Mint Account
+
     #[account(
-        seeds = [b"marketplace", marketplace.name.as_str().as_bytes()],
-        bump = marketplace.bump,
+        mut,
+        seeds = [MARKETPLACE,marketplace.name.as_bytes()],
+        bump = marketplace.marketplace_bump
     )]
     pub marketplace: Account<'info, Marketplace>,
 
-    pub maker_mint: InterfaceAccount<'info, Mint>,
+    #[account(
+        init,
+        payer = creater,
+        space = ListingAccount::LIST_SIZE,
+        seeds = [
+            LIST_NFT,
+            marketplace.key().to_bytes().as_ref(),
+            creater_mint.key().to_bytes().as_ref()
+        ],
+        bump
+    )]
+    pub list_account: Account<'info, ListingAccount>,
+
     #[account(
         mut,
-        associated_token::mint = maker_mint,
-        associated_token::authority = maker,
+        associated_token::mint = creater_mint,
+        associated_token::authority = creater
     )]
+    pub creater_nft_account: InterfaceAccount<'info, TokenAccount>, // Madlad NFT Token Account
 
-    pub maker_ata: InterfaceAccount<'info, TokenAccount>,
     #[account(
         init,
-        payer = maker,
-        associated_token::mint = maker_mint,
-        associated_token::authority = listing,
+        payer = creater,
+        associated_token::mint = creater_mint,
+        associated_token::authority = list_account,
     )]
+    pub nft_vault_account: InterfaceAccount<'info, TokenAccount>,
 
-    pub vault: InterfaceAccount<'info, TokenAccount>,
-    #[account(
-        init,
-        payer = maker,
-        seeds = [marketplace.key().as_ref(), maker_mint.key().as_ref()],
-        bump,
-        space = Listing::INIT_SPACE,
-    )]
+    // NFT Validation accounts
+    pub collection_mint: InterfaceAccount<'info, Mint>, // to verify NFT belongs to Madlad collection
 
-    pub listing: Account<'info, Listing>,
-
-    pub collection_mint: InterfaceAccount<'info, Mint>,
     #[account(
         seeds = [
-            b"metadata", 
-            metadata_program.key().as_ref(),
-            maker_mint.key().as_ref(),
+            b"metadata",
+            metadata_program.key.as_ref(),
+            creater_mint.key().as_ref(),
         ],
-        seeds::program = metadata_program.key(),
+        seeds::program = metadata_program.key,
         bump,
-        constraint = metadata.collection.as_ref().unwrap().key.as_ref() == collection_mint.key().as_ref() @MarketplaceError::InvalidCollection,
-        constraint = metadata.collection.as_ref().unwrap().verified == true,
+        constraint = metadata.collection.as_ref().unwrap().key.as_ref() == collection_mint.key().as_ref(), // chekcing the collection validity
+        constraint = metadata.collection.as_ref().unwrap().verified == true
     )]
-
     pub metadata: Account<'info, MetadataAccount>,
+
     #[account(
         seeds = [
-            b"metadata", 
-            metadata_program.key().as_ref(),
-            maker_mint.key().as_ref(),
+            b"metadata",
+            metadata_program.key.as_ref(),
+            creater_mint.key().as_ref(),
             b"edition"
         ],
-        seeds::program = metadata_program.key(),
         bump,
+        seeds::program = metadata_program.key
     )]
-    
     pub master_edition: Account<'info, MasterEditionAccount>,
-    pub metadata_program: Program<'info, Metadata>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
+
+    // Program Accounts
     pub system_program: Program<'info, System>,
     pub token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub metadata_program: Program<'info, Metadata>,
 }
 
 impl<'info> List<'info> {
-    pub fn create_listing(&mut self, price: u64, bumps: &ListBumps) -> Result<()> {
-        self.listing.set_inner(Listing {
-            maker: self.maker.key(),
-            mint: self.maker_mint.key(),
-            price,
-            bump: bumps.listing,
+    pub fn initialize_list(&mut self, price: u16, bumps: ListBumps) -> Result<()> {
+        self.list_account.set_inner(ListingAccount {
+            creater: self.creater.key(),
+            nft_mint: self.creater_mint.key(),
+            nft_price: price,
+            listing_bump: bumps.list_account,
         });
-
         Ok(())
     }
 
-    pub fn deposit_nft(&mut self) -> Result<()> {
-        let cpi_program = self.token_program.to_account_info();
+    pub fn deposite_nft(&mut self) -> Result<()> {
+        // Depositing the NFT from user wallet to program contolled vault
 
-        let cpi_accounts = TransferChecked {
-            from: self.maker_ata.to_account_info(),
-            to: self.vault.to_account_info(),
-            authority: self.maker.to_account_info(),
-            mint: self.maker_mint.to_account_info(),
+        let cpi_program = self.token_program.to_account_info();
+        let tranfer_accounts = TransferChecked {
+            authority: self.creater.to_account_info(),
+            mint: self.creater_mint.to_account_info(),
+            from: self.creater_nft_account.to_account_info(),
+            to: self.nft_vault_account.to_account_info(),
         };
 
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        let cpi_context = CpiContext::new(cpi_program, tranfer_accounts);
 
-        transfer_checked(cpi_ctx, 1, self.maker_mint.decimals)?;
+        transfer_checked(cpi_context, 1, self.creater_mint.decimals)?;
 
         Ok(())
     }

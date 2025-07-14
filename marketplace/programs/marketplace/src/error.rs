@@ -1,9 +1,8 @@
-use anchor_lang::error_code;
+
+use anchor_lang::prelude::*;
 
 #[error_code]
-pub enum MarketplaceError{
-    #[msg("The given name is too long")]
-    NameTooLong,
-    #[msg("The given collection does not exist")]
-    InvalidCollection,
+pub enum MarketPlaceErrors {
+    #[msg("The name is too long brother")]
+    TooLongName,
 }

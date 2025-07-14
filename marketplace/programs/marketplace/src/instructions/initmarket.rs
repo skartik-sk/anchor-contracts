@@ -1,51 +1,68 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenInterface};
 
-use crate::{state::Marketplace, MarketplaceError};
+use crate::contants::{MARKETPLACE, REWARD, TRESURY};
+use crate::error::MarketPlaceErrors;
+use crate::state::marketplace::Marketplace;
+
+// Our program controlls the marketplace pda, treasury pda and reward pda.
 
 #[derive(Accounts)]
-#[instruction(name: String)]
-pub struct Initialize<'info> {
+#[instruction(name:String)]
+pub struct InitMarketplace<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
+
     #[account(
         init,
         payer = admin,
-        seeds = [b"marketplace", name.as_str().as_bytes()],
-        bump,
-        space = Marketplace::INIT_SPACE
+        space =  Marketplace::LEN,
+        seeds = [MARKETPLACE,name.as_bytes()],
+        bump
     )]
-    pub marketplace: Account<'info, Marketplace>,
+    pub market_place_account: Account<'info, Marketplace>, // Our PDA
+
     #[account(
-        seeds = [b"treasury", marketplace.key().as_ref()],
-        bump,
+        seeds = [TRESURY,market_place_account.key().as_ref()],
+        bump
     )]
-    pub treasury: SystemAccount<'info>,
+    pub treasury_account: SystemAccount<'info>, // Admins treasury amount will be collected hear.
+
     #[account(
         init,
         payer = admin,
-        seeds = [b"rewards", marketplace.key().as_ref()],
+        seeds = [REWARD,market_place_account.key().as_ref()],
         bump,
-        mint::decimals = 6,
-        mint::authority = marketplace,
+        mint::authority = market_place_account, // This acc is contolled by our program.
+        mint::decimals = 6
     )]
-    pub rewards_mint: InterfaceAccount<'info, Mint>,
+    pub reward_account: InterfaceAccount<'info, Mint>,
+
     pub system_program: Program<'info, System>,
     pub token_program: Interface<'info, TokenInterface>,
 }
 
-impl<'info> Initialize<'info> {
-    pub fn init(&mut self, name: String, fee: u16, bumps: &InitializeBumps) -> Result<()> {
-        require!(name.len() > 0 && name.len() < 4 + 33, MarketplaceError::NameTooLong);
-        
-        self.marketplace.set_inner(Marketplace {
-            admin: self.admin.key(),
-            fee,
-            bump: bumps.marketplace,
-            treasury_bump: bumps.treasury,
-            rewards_mint_bump: bumps.rewards_mint,
+impl<'info> InitMarketplace<'info> {
+    pub fn initialize_marketplace(
+        &mut self,
+        name: String,
+        fee: u16,
+        bumps: InitMarketplaceBumps,
+    ) -> Result<()> {
+        require!(
+            name.len() > 1 && name.len() <= 32,
+            MarketPlaceErrors::TooLongName
+        );
+
+        self.market_place_account.set_inner(Marketplace {
+            admin: self.admin.to_account_info().key(),
+            fees: fee,
+            marketplace_bump: bumps.market_place_account,
+            treasury_bump: bumps.treasury_account,
+            reward_bum: bumps.reward_account,
             name,
         });
+
         Ok(())
     }
 }

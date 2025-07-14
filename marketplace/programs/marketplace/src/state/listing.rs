@@ -1,13 +1,14 @@
 use anchor_lang::prelude::*;
 
+// Information for every NFT listed
 #[account]
-pub struct Listing {
-    pub maker: Pubkey,
-    pub price: u64,
-    pub mint: Pubkey,
-    pub bump: u8,
+pub struct ListingAccount {
+    pub creater: Pubkey,
+    pub nft_mint: Pubkey,
+    pub nft_price: u16,
+    pub listing_bump: u8,
 }
 
-impl Space for Listing {
-    const INIT_SPACE: usize = 8 + 32 + 32 + 8 + 1;
+impl ListingAccount {
+    pub const LIST_SIZE: usize = 8 + 32 + 32 + 2 + 1;
 }
